@@ -77,7 +77,7 @@ def ingest_transactions(payload: TransactionIngestRequest, db: Session = Depends
         existing = db.query(Transaction).filter(Transaction.external_id == ext_id).first()
         if existing:
             existing.user_id = payload.user_id
-            existing.account_id = t.account_id
+            existing.account_id = "Capital One"
             existing.date = t.date
             existing.name = t.name
             existing.merchant_name = t.merchant_name
@@ -92,7 +92,7 @@ def ingest_transactions(payload: TransactionIngestRequest, db: Session = Depends
                 user_id=payload.user_id,
                 plaid_item_id=None,
                 external_id=ext_id,
-                account_id=t.account_id,
+                account_id="Capital One",
                 date=t.date,
                 name=t.name,
                 merchant_name=t.merchant_name,
@@ -229,7 +229,7 @@ def seed_demo_data(user_id: int = Form(..., gt=0), db: Session = Depends(get_db)
                 user_id=user_id,
                 plaid_item_id=None,
                 external_id=ext_id,
-                account_id="demo-account",
+                account_id="Capital One",
                 date=tx_date,
                 name=f"{merchant} {base_name}",
                 merchant_name=merchant,
@@ -296,7 +296,7 @@ async def upload_csv(
         existing = db.query(Transaction).filter(Transaction.external_id == ext_id).first()
         if existing:
             existing.user_id = user_id
-            existing.account_id = (row.get("account_id") or None)
+            existing.account_id = "Capital One"
             existing.date = tx_date
             existing.name = name
             existing.merchant_name = merchant
@@ -311,7 +311,7 @@ async def upload_csv(
                 user_id=user_id,
                 plaid_item_id=None,
                 external_id=ext_id,
-                account_id=(row.get("account_id") or None),
+                account_id="Capital One",
                 date=tx_date,
                 name=name,
                 merchant_name=merchant,
