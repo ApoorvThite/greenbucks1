@@ -15,6 +15,7 @@ from sqlalchemy import (
     JSON,
     UniqueConstraint,
     Index,
+    Boolean,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -63,6 +64,12 @@ class Transaction(Base):
     # Optional metadata
     category: Mapped[Optional[list[str]]] = mapped_column(JSON)
     location: Mapped[Optional[dict]] = mapped_column(JSON)
+
+    # Eco/cashback fields
+    # eco_score in 0..10, nullable until computed (esp. for mixed retailers needing receipt OCR)
+    eco_score: Mapped[Optional[int]] = mapped_column(Integer)
+    cashback_usd: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2))
+    needs_receipt: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

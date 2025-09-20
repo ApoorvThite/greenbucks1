@@ -20,6 +20,9 @@ class TransactionRead(BaseModel):
     iso_currency_code: Optional[str] = None
     category: Optional[list[str]] = None
     location: Optional[dict] = None
+    eco_score: Optional[int] = None
+    cashback_usd: Optional[Decimal] = None
+    needs_receipt: bool = False
     created_at: datetime
     updated_at: datetime
 

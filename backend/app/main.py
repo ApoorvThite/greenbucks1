@@ -7,6 +7,7 @@ from .api.routes.health import router as health_router
 from .api.routes.users import router as users_router
 from .api.routes.plaid import router as plaid_router
 from .api.routes.transactions import router as transactions_router
+from .api.routes.receipts import router as receipts_router
 from .api.routes.plaid_webhook import router as plaid_webhook_router
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -67,6 +68,7 @@ def create_app() -> FastAPI:
     application.include_router(users_router)
     application.include_router(plaid_router)
     application.include_router(transactions_router)
+    application.include_router(receipts_router)
     application.include_router(plaid_webhook_router)
 
     @application.get("/")

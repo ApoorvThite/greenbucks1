@@ -16,6 +16,11 @@ from ...models.plaid import Transaction
 from ...models.user import User
 from ...core.security import hash_password
 from ...schemas.transaction import TransactionRead, TransactionIngestRequest
+from ...services.eco_scoring import (
+    is_mixed_merchant,
+    quick_merchant_score,
+    compute_cashback,
+)
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
 
@@ -85,9 +90,29 @@ def ingest_transactions(payload: TransactionIngestRequest, db: Session = Depends
             existing.iso_currency_code = t.iso_currency_code
             existing.category = t.category
             existing.location = t.location
+            # eco/cashback
+            if is_mixed_merchant(existing.merchant_name):
+                existing.needs_receipt = True
+                existing.eco_score = None
+                existing.cashback_usd = compute_cashback(existing.amount, None)
+            else:
+                score = quick_merchant_score(existing.merchant_name, existing.category)
+                existing.eco_score = score
+                existing.needs_receipt = False
+                existing.cashback_usd = compute_cashback(existing.amount, score)
             db.add(existing)
             updated += 1
         else:
+            # eco/cashback
+            if is_mixed_merchant(t.merchant_name):
+                eco_score = None
+                needs_receipt = True
+                cashback = compute_cashback(t.amount, None)
+            else:
+                eco_score = quick_merchant_score(t.merchant_name, t.category)
+                needs_receipt = False
+                cashback = compute_cashback(t.amount, eco_score)
+
             db.add(Transaction(
                 user_id=payload.user_id,
                 plaid_item_id=None,
@@ -100,6 +125,9 @@ def ingest_transactions(payload: TransactionIngestRequest, db: Session = Depends
                 iso_currency_code=t.iso_currency_code,
                 category=t.category,
                 location=t.location,
+                eco_score=eco_score,
+                cashback_usd=cashback,
+                needs_receipt=needs_receipt,
             ))
             created += 1
     db.commit()
@@ -225,6 +253,16 @@ def seed_demo_data(user_id: int = Form(..., gt=0), db: Session = Depends(get_db)
             exists = db.query(Transaction).filter(Transaction.external_id == ext_id).first()
             if exists:
                 continue
+            # determine eco/cashback
+            if is_mixed_merchant(merchant):
+                eco_score = None
+                needs_receipt = True
+                cashback = compute_cashback(amt, None)
+            else:
+                eco_score = quick_merchant_score(merchant, cats)
+                needs_receipt = False
+                cashback = compute_cashback(amt, eco_score)
+
             db.add(Transaction(
                 user_id=user_id,
                 plaid_item_id=None,
@@ -237,6 +275,9 @@ def seed_demo_data(user_id: int = Form(..., gt=0), db: Session = Depends(get_db)
                 iso_currency_code="USD",
                 category=cats,
                 location=None,
+                eco_score=eco_score,
+                cashback_usd=cashback,
+                needs_receipt=needs_receipt,
             ))
             created += 1
     db.commit()
@@ -304,9 +345,28 @@ async def upload_csv(
             existing.iso_currency_code = iso
             existing.category = cats
             existing.location = loc
+            # eco/cashback
+            if is_mixed_merchant(existing.merchant_name):
+                existing.needs_receipt = True
+                existing.eco_score = None
+                existing.cashback_usd = compute_cashback(existing.amount, None)
+            else:
+                score = quick_merchant_score(existing.merchant_name, existing.category)
+                existing.eco_score = score
+                existing.needs_receipt = False
+                existing.cashback_usd = compute_cashback(existing.amount, score)
             db.add(existing)
             updated += 1
         else:
+            if is_mixed_merchant(merchant):
+                eco_score = None
+                needs_receipt = True
+                cashback = compute_cashback(amount, None)
+            else:
+                eco_score = quick_merchant_score(merchant, cats)
+                needs_receipt = False
+                cashback = compute_cashback(amount, eco_score)
+
             db.add(Transaction(
                 user_id=user_id,
                 plaid_item_id=None,
@@ -319,6 +379,9 @@ async def upload_csv(
                 iso_currency_code=iso,
                 category=cats,
                 location=loc,
+                eco_score=eco_score,
+                cashback_usd=cashback,
+                needs_receipt=needs_receipt,
             ))
             created += 1
     db.commit()

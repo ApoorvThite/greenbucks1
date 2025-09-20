@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Optional
 
 
 class Settings(BaseSettings):
@@ -29,6 +30,12 @@ class Settings(BaseSettings):
 
     # Cerebras
     cerebras_api_key: str | None = None
+
+    # Eco/OCR/Climatiq
+    google_vision_api_key: Optional[str] = None
+    climatiq_api_key: Optional[str] = None
+    use_real_ocr: bool = False
+    use_real_climatiq: bool = False
 
     # Encryption key for securing secrets at rest (Fernet key)
     # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
