@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from typing import List, Optional
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from sqlalchemy import and_, desc, asc
@@ -20,7 +21,10 @@ from ...services.eco_scoring import (
     is_mixed_merchant,
     quick_merchant_score,
     compute_cashback,
+    score_from_co2e_per_dollar,
 )
+from ...services.integrations.climatiq_client import estimate_item_footprint
+import inspect
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
 
@@ -70,7 +74,7 @@ def list_transactions(
 
 
 @router.post("/ingest", response_model=dict)
-def ingest_transactions(payload: TransactionIngestRequest, db: Session = Depends(get_db)):
+async def ingest_transactions(payload: TransactionIngestRequest, db: Session = Depends(get_db)):
     """Bulk insert hardcoded transactions for testing purposes.
 
     If an incoming transaction is missing `external_id`, one will be generated.
@@ -96,10 +100,29 @@ def ingest_transactions(payload: TransactionIngestRequest, db: Session = Depends
                 existing.eco_score = None
                 existing.cashback_usd = compute_cashback(existing.amount, None)
             else:
-                score = quick_merchant_score(existing.merchant_name, existing.category)
-                existing.eco_score = score
-                existing.needs_receipt = False
-                existing.cashback_usd = compute_cashback(existing.amount, score)
+                # Compute eco using Climatiq (live if enabled) for the whole transaction amount
+                try:
+                    est = estimate_item_footprint(existing.merchant_name or existing.name, float(existing.amount), 1, existing.category)
+                    res = await est if inspect.isawaitable(est) else est
+                    if isinstance(res, tuple) and len(res) == 3:
+                        kg_co2e, _src, _fid = res
+                    else:
+                        kg_co2e = res
+                    amt = float(existing.amount) if existing.amount else 0.0
+                    co2_per_usd = (float(kg_co2e) / amt) if amt > 0 else float(kg_co2e)
+                    score = score_from_co2e_per_dollar(co2_per_usd)
+                    eco_bonus_rate = (Decimal(score) / Decimal(10)) * Decimal("0.04")
+                    base_cashback_rate = Decimal("0.01")
+                    total_rate = base_cashback_rate + eco_bonus_rate
+                    existing.eco_score = score
+                    existing.needs_receipt = False
+                    existing.cashback_usd = (Decimal(str(existing.amount)) * total_rate).quantize(Decimal("0.01"))
+                except Exception:
+                    # Fallback to legacy quick score path
+                    score = quick_merchant_score(existing.merchant_name, existing.category)
+                    existing.eco_score = score
+                    existing.needs_receipt = False
+                    existing.cashback_usd = compute_cashback(existing.amount, score)
             db.add(existing)
             updated += 1
         else:
@@ -109,9 +132,26 @@ def ingest_transactions(payload: TransactionIngestRequest, db: Session = Depends
                 needs_receipt = True
                 cashback = compute_cashback(t.amount, None)
             else:
-                eco_score = quick_merchant_score(t.merchant_name, t.category)
-                needs_receipt = False
-                cashback = compute_cashback(t.amount, eco_score)
+                # Compute eco for non-mixed: live Climatiq when available; fallback to quick score
+                try:
+                    est = estimate_item_footprint(t.merchant_name or t.name, float(t.amount), 1, t.category)
+                    res = await est if inspect.isawaitable(est) else est
+                    if isinstance(res, tuple) and len(res) == 3:
+                        kg_co2e, _src, _fid = res
+                    else:
+                        kg_co2e = res
+                    amt = float(t.amount) if t.amount else 0.0
+                    co2_per_usd = (float(kg_co2e) / amt) if amt > 0 else float(kg_co2e)
+                    eco_score = score_from_co2e_per_dollar(co2_per_usd)
+                    eco_bonus_rate = (Decimal(eco_score) / Decimal(10)) * Decimal("0.04")
+                    base_cashback_rate = Decimal("0.01")
+                    total_rate = base_cashback_rate + eco_bonus_rate
+                    needs_receipt = False
+                    cashback = (Decimal(str(t.amount)) * total_rate).quantize(Decimal("0.01"))
+                except Exception:
+                    eco_score = quick_merchant_score(t.merchant_name, t.category)
+                    needs_receipt = False
+                    cashback = compute_cashback(t.amount, eco_score)
 
             db.add(Transaction(
                 user_id=payload.user_id,
@@ -284,6 +324,78 @@ def seed_demo_data(user_id: int = Form(..., gt=0), db: Session = Depends(get_db)
     return {"created": created}
 
 
+@router.post("/recompute_all", response_model=dict)
+async def recompute_all(
+    user_id: int | None = None,
+    only_missing: bool = True,
+    limit: int = 200,
+    db: Session = Depends(get_db),
+):
+    """Backfill eco_score and cashback_usd for existing transactions.
+
+    - Mixed merchants remain needs_receipt=True and are skipped.
+    - Non-mixed merchants: compute kgCO2e via Climatiq (if enabled) on full transaction amount,
+      map to eco_score, then compute cashback as base 1% + up to 4% bonus.
+    """
+    q = db.query(Transaction)
+    if user_id is not None:
+        q = q.filter(Transaction.user_id == user_id)
+    # Process the most recent transactions first
+    q = q.order_by(desc(Transaction.date), desc(Transaction.id)).limit(max(1, min(limit, 1000)))
+    rows = q.all()
+    updated = 0
+    for tx in rows:
+        try:
+            if is_mixed_merchant(tx.merchant_name):
+                # Mixed: require receipt, leave until upload
+                tx.needs_receipt = True
+                if not only_missing:
+                    tx.eco_score = None
+                    tx.cashback_usd = None
+                db.add(tx)
+                updated += 1
+                continue
+
+            # Skip if only_missing and already has values
+            if only_missing and (tx.eco_score is not None and tx.cashback_usd is not None):
+                continue
+
+            est = estimate_item_footprint(tx.merchant_name or tx.name, float(tx.amount), 1, tx.category)
+            res = await est if inspect.isawaitable(est) else est
+            if isinstance(res, tuple) and len(res) == 3:
+                kg_co2e, _src, _fid = res
+            else:
+                kg_co2e = res
+            amt = float(tx.amount) if tx.amount else 0.0
+            co2_per_usd = (float(kg_co2e) / amt) if amt > 0 else float(kg_co2e)
+            score = score_from_co2e_per_dollar(co2_per_usd)
+            eco_bonus_rate = (Decimal(score) / Decimal(10)) * Decimal("0.04")
+            base_cashback_rate = Decimal("0.01")
+            total_rate = base_cashback_rate + eco_bonus_rate
+            tx.eco_score = score
+            tx.needs_receipt = False
+            tx.cashback_usd = (Decimal(str(tx.amount)) * total_rate).quantize(Decimal("0.01"))
+            db.add(tx)
+            updated += 1
+        except Exception:
+            # Fallback: compute quick score and cashback with the same rate formula
+            try:
+                score = quick_merchant_score(tx.merchant_name, tx.category)
+                eco_bonus_rate = (Decimal(score) / Decimal(10)) * Decimal("0.04")
+                base_cashback_rate = Decimal("0.01")
+                total_rate = base_cashback_rate + eco_bonus_rate
+                tx.eco_score = score
+                tx.needs_receipt = False
+                tx.cashback_usd = (Decimal(str(tx.amount)) * total_rate).quantize(Decimal("0.01"))
+                db.add(tx)
+                updated += 1
+            except Exception:
+                # If even fallback fails, leave as-is
+                continue
+    db.commit()
+    return {"processed": len(rows), "updated": updated}
+
+
 @router.post("/upload_csv", response_model=dict)
 async def upload_csv(
     user_id: int = Form(..., gt=0),
@@ -351,10 +463,27 @@ async def upload_csv(
                 existing.eco_score = None
                 existing.cashback_usd = compute_cashback(existing.amount, None)
             else:
-                score = quick_merchant_score(existing.merchant_name, existing.category)
-                existing.eco_score = score
-                existing.needs_receipt = False
-                existing.cashback_usd = compute_cashback(existing.amount, score)
+                try:
+                    est = estimate_item_footprint(existing.merchant_name or existing.name, float(existing.amount), 1)
+                    res = await est if inspect.isawaitable(est) else est
+                    if isinstance(res, tuple) and len(res) == 3:
+                        kg_co2e, _src, _fid = res
+                    else:
+                        kg_co2e = res
+                    amt = float(existing.amount) if existing.amount else 0.0
+                    co2_per_usd = (float(kg_co2e) / amt) if amt > 0 else float(kg_co2e)
+                    score = score_from_co2e_per_dollar(co2_per_usd)
+                    eco_bonus_rate = (Decimal(score) / Decimal(10)) * Decimal("0.04")
+                    base_cashback_rate = Decimal("0.01")
+                    total_rate = base_cashback_rate + eco_bonus_rate
+                    existing.eco_score = score
+                    existing.needs_receipt = False
+                    existing.cashback_usd = (Decimal(str(existing.amount)) * total_rate).quantize(Decimal("0.01"))
+                except Exception:
+                    score = quick_merchant_score(existing.merchant_name, existing.category)
+                    existing.eco_score = score
+                    existing.needs_receipt = False
+                    existing.cashback_usd = compute_cashback(existing.amount, score)
             db.add(existing)
             updated += 1
         else:
@@ -363,9 +492,25 @@ async def upload_csv(
                 needs_receipt = True
                 cashback = compute_cashback(amount, None)
             else:
-                eco_score = quick_merchant_score(merchant, cats)
-                needs_receipt = False
-                cashback = compute_cashback(amount, eco_score)
+                try:
+                    est = estimate_item_footprint(merchant or name, float(amount), 1, cats)
+                    res = await est if inspect.isawaitable(est) else est
+                    if isinstance(res, tuple) and len(res) == 3:
+                        kg_co2e, _src, _fid = res
+                    else:
+                        kg_co2e = res
+                    amt = float(amount) if amount else 0.0
+                    co2_per_usd = (float(kg_co2e) / amt) if amt > 0 else float(kg_co2e)
+                    eco_score = score_from_co2e_per_dollar(co2_per_usd)
+                    eco_bonus_rate = (Decimal(eco_score) / Decimal(10)) * Decimal("0.04")
+                    base_cashback_rate = Decimal("0.01")
+                    total_rate = base_cashback_rate + eco_bonus_rate
+                    needs_receipt = False
+                    cashback = (Decimal(str(amount)) * total_rate).quantize(Decimal("0.01"))
+                except Exception:
+                    eco_score = quick_merchant_score(merchant, cats)
+                    needs_receipt = False
+                    cashback = compute_cashback(amount, eco_score)
 
             db.add(Transaction(
                 user_id=user_id,

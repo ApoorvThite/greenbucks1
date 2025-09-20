@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     climatiq_api_key: Optional[str] = None
     use_real_ocr: bool = False
     use_real_climatiq: bool = False
+    use_cerebras_parser: bool = False
 
     # Encryption key for securing secrets at rest (Fernet key)
     # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"

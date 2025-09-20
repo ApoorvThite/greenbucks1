@@ -14,31 +14,38 @@ def is_mixed_merchant(merchant_name: Optional[str]) -> bool:
 
 
 def score_from_co2e_per_dollar(co2e_per_usd: float | None) -> int:
-    """Map kgCO2e per $ to an integer eco score 0..10.
-    Bands (adjustable):
-      <= 0.05 -> 10
-      0.05–0.10 -> 9
-      0.10–0.20 -> 7–8
-      0.20–0.40 -> 5–6
-      0.40–0.80 -> 3–4
-      > 0.80 -> 0–2
+    """Map kgCO2e per $ to an integer eco score 0..10 with finer granularity.
+
+    This scale is tuned to spread common spend-based footprints across more bins so
+    ride share and gasoline trend to lower scores, while public transit trends higher.
+
     If None: neutral 5.
     """
     if co2e_per_usd is None:
         return 5
-    x = co2e_per_usd
-    if x <= 0.05:
+    x = max(0.0, float(co2e_per_usd))
+    # Very low carbon per $ (excellent)
+    if x <= 0.03:
         return 10
-    if x <= 0.10:
+    if x <= 0.06:
         return 9
-    if x <= 0.20:
-        return 8 if x <= 0.15 else 7
-    if x <= 0.40:
-        return 6 if x <= 0.30 else 5
-    if x <= 0.80:
-        return 4 if x <= 0.60 else 3
-    # very high
-    return 2 if x <= 1.2 else 1 if x <= 2.0 else 0
+    if x <= 0.10:
+        return 8
+    if x <= 0.15:
+        return 7
+    if x <= 0.22:
+        return 6
+    if x <= 0.30:
+        return 5
+    if x <= 0.45:
+        return 4
+    if x <= 0.60:
+        return 3
+    if x <= 0.90:
+        return 2
+    if x <= 1.50:
+        return 1
+    return 0
 
 
 def map_score_to_multiplier(score: int) -> float:
