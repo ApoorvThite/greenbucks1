@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 import inspect
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Header, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ...db.session import get_db
 from ...models.plaid import Transaction
 from ...models.receipt import ReceiptItem
+from ...models.user import User
+from ...core.security import decode_access_token
 from ...services.integrations.ocr_google_vision import (
     parse_receipt,
     parse_receipt_diagnostics,
@@ -24,15 +26,35 @@ from ...services.eco_scoring import score_from_co2e_per_dollar, compute_cashback
 router = APIRouter(prefix="/receipts", tags=["receipts"])
 
 
+def get_current_user(
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> User:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+    token = authorization.split(" ", 1)[1]
+    payload = decode_access_token(token)
+    if not payload:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    sub = payload.get("sub") or {}
+    user_id = sub.get("id")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token subject")
+    user: User | None = db.query(User).filter(User.id == int(user_id)).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    return user
+
+
 @router.post("/upload", response_model=dict)
 async def upload_receipt(
-    user_id: int = Form(..., gt=0),
     transaction_id: int = Form(..., gt=0),
     file: UploadFile = File(...),
     debug_raw_text: bool = Form(False),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    tx: Transaction | None = db.query(Transaction).filter(Transaction.id == transaction_id, Transaction.user_id == user_id).first()
+    tx: Transaction | None = db.query(Transaction).filter(Transaction.id == transaction_id, Transaction.user_id == current_user.id).first()
     if not tx:
         raise HTTPException(status_code=404, detail="Transaction not found for user")
 
@@ -157,7 +179,6 @@ async def upload_receipt(
 
 class ReceiptText(BaseModel):
     text: str
-    user_id: int | None = None
     transaction_id: int | None = None
 
 
@@ -177,18 +198,18 @@ async def parse_receipt_text_debug(payload: ReceiptText):
 
 
 @router.post("/ingest_text", response_model=dict)
-async def ingest_receipt_text(payload: ReceiptText, db: Session = Depends(get_db)):
+async def ingest_receipt_text(payload: ReceiptText, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Use Cerebras to parse provided receipt text and persist items to a transaction.
 
     This bypasses OCR. Requires user_id and transaction_id. Returns the same response
     structure as /receipts/upload.
     """
-    if not payload.user_id or not payload.transaction_id:
-        raise HTTPException(status_code=400, detail="user_id and transaction_id are required")
+    if not payload.transaction_id:
+        raise HTTPException(status_code=400, detail="transaction_id is required")
 
     tx: Transaction | None = (
         db.query(Transaction)
-        .filter(Transaction.id == payload.transaction_id, Transaction.user_id == payload.user_id)
+        .filter(Transaction.id == payload.transaction_id, Transaction.user_id == current_user.id)
         .first()
     )
     if not tx:
@@ -282,9 +303,9 @@ async def ingest_receipt_text(payload: ReceiptText, db: Session = Depends(get_db
         "items_detailed": items_detailed,
     }
 @router.get("/{transaction_id}/items", response_model=list[dict])
-def list_receipt_items(transaction_id: int, user_id: int, db: Session = Depends(get_db)):
+def list_receipt_items(transaction_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Fetch stored parsed receipt items for a user's transaction."""
-    tx: Transaction | None = db.query(Transaction).filter(Transaction.id == transaction_id, Transaction.user_id == user_id).first()
+    tx: Transaction | None = db.query(Transaction).filter(Transaction.id == transaction_id, Transaction.user_id == current_user.id).first()
     if not tx:
         raise HTTPException(status_code=404, detail="Transaction not found for user")
     rows = db.query(ReceiptItem).filter(ReceiptItem.transaction_id == transaction_id).all()

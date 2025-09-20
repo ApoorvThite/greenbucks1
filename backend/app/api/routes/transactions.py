@@ -4,7 +4,7 @@ from datetime import date
 from typing import List, Optional
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, Header, status
 from sqlalchemy import and_, desc, asc
 from sqlalchemy.orm import Session
 from uuid import uuid4
@@ -15,7 +15,9 @@ from datetime import datetime, timedelta
 from ...db.session import get_db
 from ...models.plaid import Transaction
 from ...models.user import User
+from ...models.user import User
 from ...core.security import hash_password
+from ...core.security import decode_access_token
 from ...schemas.transaction import TransactionRead, TransactionIngestRequest
 from ...services.eco_scoring import (
     is_mixed_merchant,
@@ -71,6 +73,68 @@ def list_transactions(
     q = q.order_by(order(sort_column), order(Transaction.id)).offset(offset).limit(limit)
     results = q.all()
     return results
+
+
+# --- Auth helpers ---
+def get_current_user(
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> User:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+    token = authorization.split(" ", 1)[1]
+    payload = decode_access_token(token)
+    if not payload:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    sub = payload.get("sub") or {}
+    user_id = sub.get("id")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token subject")
+    user: User | None = db.query(User).filter(User.id == int(user_id)).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    return user
+
+
+@router.get("/my", response_model=List[TransactionRead])
+def list_my_transactions(
+    start_date: Optional[date] = Query(None),
+    end_date: Optional[date] = Query(None),
+    merchant: Optional[str] = Query(None, description="Substring match on merchant name"),
+    min_amount: Optional[float] = Query(None),
+    max_amount: Optional[float] = Query(None),
+    category: Optional[str] = Query(None, description="Keyword to match in name or merchant as a proxy for category"),
+    sort_by: str = Query("date", pattern="^(date|amount|name)$"),
+    sort_dir: str = Query("desc", pattern="^(asc|desc)$"),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    q = db.query(Transaction).filter(Transaction.user_id == current_user.id)
+
+    if start_date is not None:
+        q = q.filter(Transaction.date >= start_date)
+    if end_date is not None:
+        q = q.filter(Transaction.date <= end_date)
+    if merchant:
+        q = q.filter(Transaction.merchant_name.ilike(f"%{merchant}%"))
+    if min_amount is not None:
+        q = q.filter(Transaction.amount >= min_amount)
+    if max_amount is not None:
+        q = q.filter(Transaction.amount <= max_amount)
+    if category:
+        like = f"%{category}%"
+        q = q.filter((Transaction.name.ilike(like)) | (Transaction.merchant_name.ilike(like)))
+
+    sort_column = {
+        "date": Transaction.date,
+        "amount": Transaction.amount,
+        "name": Transaction.name,
+    }[sort_by]
+    order = desc if sort_dir == "desc" else asc
+    q = q.order_by(order(sort_column), order(Transaction.id)).offset(offset).limit(limit)
+    return q.all()
 
 
 @router.post("/ingest", response_model=dict)

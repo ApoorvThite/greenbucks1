@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     encryption_key: str | None = None
 
+    # Auth/JWT
+    jwt_secret_key: str = "dev-secret-change-me"  # override via ENV in prod
+    jwt_algorithm: str = "HS256"
+    jwt_access_token_expires_minutes: int = 60 * 24  # 24 hours
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

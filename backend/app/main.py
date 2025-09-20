@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 
 from .core.config import get_settings, AppInfo
@@ -7,6 +8,7 @@ from .api.routes.health import router as health_router
 from .api.routes.users import router as users_router
 from .api.routes.plaid import router as plaid_router
 from .api.routes.transactions import router as transactions_router
+from .api.routes.auth import router as auth_router
 from .api.routes.receipts import router as receipts_router
 from .api.routes.plaid_webhook import router as plaid_webhook_router
 
@@ -52,6 +54,7 @@ def create_app() -> FastAPI:
         debug=settings.debug,
         version="0.1.0",
         lifespan=lifespan,
+        swagger_ui_parameters={"persistAuthorization": True},
     )
 
     # CORS (adjust origins for your frontend URL)
@@ -68,8 +71,34 @@ def create_app() -> FastAPI:
     application.include_router(users_router)
     application.include_router(plaid_router)
     application.include_router(transactions_router)
+    application.include_router(auth_router)
     application.include_router(receipts_router)
     application.include_router(plaid_webhook_router)
+
+    # Inject OpenAPI security scheme so Swagger shows the Authorize button
+    def custom_openapi():
+        if application.openapi_schema:
+            return application.openapi_schema
+        openapi_schema = get_openapi(
+            title=application.title,
+            version=application.version,
+            description="GreenBucks API",
+            routes=application.routes,
+        )
+        security_scheme = {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT",
+        }
+        openapi_schema.setdefault("components", {}).setdefault("securitySchemes", {})[
+            "bearerAuth"
+        ] = security_scheme
+        # Set a global security requirement so the Authorize button applies broadly
+        openapi_schema["security"] = [{"bearerAuth": []}]
+        application.openapi_schema = openapi_schema
+        return application.openapi_schema
+
+    application.openapi = custom_openapi  # type: ignore
 
     @application.get("/")
     async def root():
